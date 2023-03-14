@@ -6,10 +6,10 @@ extends KinematicBody2D
 signal shooting
 signal crouched
 signal uncrouched
+signal collided(collision)
 
 const MAXSPEED = 350
 const CROUCH_MAXSPEED = MAXSPEED / 3
-const JUMPFORCE = 1120
 const MAXACCEL = 50
 const MINACCEL = 0.25 * MAXACCEL
 const JERK = 0.25
@@ -23,10 +23,13 @@ const SUPER_JUMP_MAX_TIME = 0.5
 var gravity = preload("res://scripts/resources/Gravity.tres")
 var stats = preload("res://scripts/resources/PlayerStats.tres")
 
+var jump_force := 1120
+var push_factor := 0.3 #How strongly the player pushes rigid bodies. Scaled by speed.
+
 var coyote_timer = COYOTE_TIME  # used to give a bit of extra-time to jump after leaving the ground
 var jump_buffer_timer = 0  # gives a bit of buffer to hit the jump button before landing
 var x_motion = AxisMotion.new(AxisMotion.X, MAXSPEED, MAXACCEL, JERK)
-var y_motion = AxisMotion.new(gravity.direction, JUMPFORCE, gravity.strength, 0.0)
+var y_motion = AxisMotion.new(gravity.direction, jump_force, gravity.strength, 0.0)
 var gravity_multiplier = 1  # used for jump height variability
 var double_jump = true
 var crouching = false
@@ -38,6 +41,9 @@ var super_jumping = false
 var super_jump_timer = 0.0
 var powerupspeed = 1
 var powerupaccel = 1
+var input_direction := Vector2.ZERO #The direction the player is pressing this frame
+var added_motion := Vector2.ZERO #Extra motion that needs to be added this frame, not multiplied by delta
+
 
 onready var pivot: Node2D = $Pivot
 onready var sprite := $Pivot/Sprite
@@ -76,6 +82,8 @@ func _exit_tree():
 
 
 func _physics_process(delta: float) -> void:
+	#Reset the input direction, will be changed if the player is moving
+	input_direction = Vector2.ZERO
 	# set these each loop in case of changes in gravity or acceleration modifiers
 	x_motion.max_speed = MAXSPEED if not crouching else CROUCH_MAXSPEED
 	x_motion.max_accel = MAXACCEL
@@ -103,6 +111,8 @@ func _physics_process(delta: float) -> void:
 		animationSpeed = 6
 	anim.playback_speed = animationSpeed
 	if Input.is_action_pressed("right"):
+		input_direction = Vector2.RIGHT
+		
 		jerk_right(JERK * jerk_modifier)
 		
 		skidding = x_motion.get_speed() < -skidding_force && _is_on_floor()
@@ -113,6 +123,8 @@ func _physics_process(delta: float) -> void:
 		
 		
 	elif Input.is_action_pressed("left"):
+		input_direction = Vector2.LEFT
+		
 		jerk_left(JERK * jerk_modifier)
 		skidding = x_motion.get_speed() > skidding_force && _is_on_floor()
 		anim.playAnim("Run")
@@ -193,9 +205,20 @@ func _physics_process(delta: float) -> void:
 	pivot.scale.y = gravity.direction.y
 
 	var move_and_slide_result = move_and_slide(
-		y_motion.update_motion() + x_motion.update_motion(), Vector2.UP
+		y_motion.update_motion() + x_motion.update_motion() + added_motion, Vector2.UP,
+		false, 4, 0.785398, false #infinite_inertia is disabled to prevent rigid bodies getting stuck in walls and similar problems
 	)
 	var slide_count = get_slide_count()
+	
+	for i in slide_count:
+		var col = get_slide_collision(i)
+		emit_signal("collided", col)
+		
+		var collider : Node2D = col.collider
+		if collider is RigidBody2D: #Push any rigid bodies this collides with
+			collider.apply_impulse(col.position - collider.global_position, -col.normal * push_factor * get_velocity().length())
+			
+	added_motion = Vector2.ZERO
 
 	var slipped = false
 	# try slipping around block corners when jumping or crossing gaps
@@ -267,7 +290,7 @@ func jump():
 	stretch(0.2, 0, 0.5, 1.2)
 	jump_buffer_timer = 0
 	coyote_timer = 0
-	y_motion.set_speed(JUMPFORCE * -1)
+	y_motion.set_speed(jump_force * -1)
 	anticipating_jump = false
 	$JumpSFX.play()
 	EventBus.emit_signal("jumping")
@@ -280,7 +303,7 @@ func super_jump():
 	tween.stop_all()
 	uncrouch()
 	stretch(0.2, 0, 1.0, 2.5)
-	y_motion.set_speed(JUMPFORCE * -100)
+	y_motion.set_speed(jump_force * -100)
 	anticipating_jump = false
 	$JumpSFX.play()
 	EventBus.emit_signal("jumping")
@@ -421,3 +444,11 @@ func flash_sprite() -> void:
 func _end_flash_sprite() -> void:
 	effect_anim.play("RESET")
 	hitbox.set_deferred('monitoring', true)
+	
+	
+func add_motion(motion: Vector2) -> void:
+	added_motion += motion
+	
+	
+func get_velocity() -> Vector2:
+	return y_motion.get_motion() + x_motion.get_motion() + added_motion
